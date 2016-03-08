@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<app version="1">
+ <name>NetBeam</name>
+ <coder>Greg T.</coder>
+ <version>0</version>
+ <short_description>Small utility for streaming games.</short_description>
+ <long_description>etc.</long_description>
+</app>
