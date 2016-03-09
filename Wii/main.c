@@ -1,6 +1,10 @@
 /*
-  NetBeam Game Streaming Client
+  NetBeam Game Streaming Client | Wii | main.c
+  Copyright (C) 2016 Greg Tourville
+  Available under the Artistic License 2.0.
 */
+/* **************************************** Main Header **************************************** */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,201 +15,407 @@
 #include <debug.h>
 #include <errno.h>
 #include <wiiuse/wpad.h>
-//#include <aesndlib.h>
-////#include "jpeg.h"
 
-static void* frameBuffer[2] = { NULL, NULL };
-static u32 frameCount = 0;
-static u32 fb = 0;
+typedef enum {
+  ERROR = 0,
+  STARTED = 1,
+  STOPPING = 2
+} _STATE;
 
-static GXRModeObj *rmode = NULL;
-static lwp_t thread_handle = (lwp_t)NULL;
+/* extern */ _STATE globalState;
+
+#define NETWORK_PORT    970
+#define HOST_IP         "192.168.1.90"
+#define HOST_NAME       "alien-pc"
+
+/* **************************************** /Main Header **************************************** */
+/* **************************************** Video Module **************************************** */
 
 typedef struct {
-  s32 sock; 
-  struct sockaddr_in sa;
-  
-} socket_data;
+  GXRModeObj* rmode;
+  void* frameBuffer;
+  unsigned int frame;
+} VIDEO_STATE;
 
-const int SCR_WIDTH = 160;
-const int SCR_HEIGHT = 120;
-const int PIX_SIZE = 4;
-
-int bRunning = 1;
-
-void UpdateFramebuffer(void* fb, char* buffer, s32 count);
-
-void *networkThread(void* argument)
+int InitVideo(VIDEO_STATE* ref)
 {
-  //char recvData[];
-  //char sendData[1026];
-  u32 recvDataSz = SCR_WIDTH*SCR_HEIGHT*PIX_SIZE + 2; 
-  char* recvData = (char*)malloc(recvDataSz);
-  u32 sendDataSz = 1026;
-  char* sendData = (char*)malloc(sendDataSz);
-  s32 bytes;
-  
-  if (recvData == NULL || sendData == NULL) {
-    free(recvData); free(sendData); return NULL;
+  unsigned int x;
+  unsigned int y;
+
+  // get video mode
+  if ((ref->rmode = VIDEO_GetPreferredMode(NULL)) == NULL)
+  {
+    return -1;
   }
   
+  // alloc framebuffer
+  if ((ref->frameBuffer = MEM_K0_TO_K1(SYS_AllocateFramebuffer(ref->rmode))) == NULL)
+  {
+    return -1;
+  }
+
+  // fill screen a solid color
+  for (y = 0; y < ref->rmode->xfbHeight; y++)
+  {
+    for (x = 0; x < ref->rmode->fbWidth; x++)
+    {
+      unsigned int* innerBuffer = (unsigned int*)ref->frameBuffer;
+      innerBuffer[y * ref->rmode->fbWidth + x] = COLOR_YELLOW;
+    }
+  }
+
+  // reset frame count
+  ref->frame = 0;
+
+  // start and flip the screen
+  VIDEO_Configure(ref->rmode);
+  VIDEO_SetNextFramebuffer(ref->frameBuffer);
+  VIDEO_SetBlack(FALSE);
+  VIDEO_Flush();
+  VIDEO_WaitVSync();
+
+  if (ref->rmode->viTVMode & VI_NON_INTERLACE) {
+    VIDEO_WaitVSync();
+  }
+
+  return 0;
+}
+
+int ShutdownVideo(VIDEO_STATE* ref)
+{
+  unsigned int x;
+  unsigned int y;
+
+  // fill screen a solid color
+  for (y = 0; y < ref->rmode->xfbHeight; y++)
+  {
+    for (x = 0; x < ref->rmode->fbWidth; x++)
+    {
+      unsigned int* innerBuffer = (unsigned int*)ref->frameBuffer;
+      innerBuffer[y * ref->rmode->fbWidth + x] = COLOR_RED;
+    }
+  }
+
+  return 0;
+}
+
+int FlipVideo(VIDEO_STATE* ref)
+{
+  // flip framebuffer & wait vsync
+  VIDEO_SetNextFramebuffer(ref->frameBuffer);
+  VIDEO_Flush();    
+  VIDEO_WaitVSync();
+  if (ref->rmode->viTVMode & VI_NON_INTERLACE) {
+    VIDEO_WaitVSync();
+  }
+  return 0;
+}
+
+typedef struct {
+  unsigned int * pixels;
+  unsigned int width;
+  unsigned int height;
+  unsigned int size;
+  unsigned char yuvFormat;
+} COLOR_BUFFER;
+
+int RenderColorBuffer(VIDEO_STATE* ref, COLOR_BUFFER* buffer)
+{
+  unsigned int x, y;
+  unsigned int swidth, sheight;
+  unsigned int width, height;
+  unsigned int xlimit, ylimit;
+  unsigned int* baseframe;
+  unsigned int* frame;
+  unsigned int* pixelsbase;
+  unsigned int* pixels;
+  unsigned char format;
+  // inner loop
+  unsigned int pixel;
+  unsigned int r, g, b;
+  unsigned char l, u, v;
+
+  swidth = ref->rmode->fbWidth;
+  sheight = ref->rmode->xfbHeight;
+
+  baseframe = (unsigned int*)ref->frameBuffer;
+  pixelsbase = buffer->pixels;
+  width = buffer->width;
+  height = buffer->height;
+  yuvFormat = buffer->yuvFormat;
+
+  xlimit = width < swidth ? width : swidth;
+  ylimit = height < sheight ? height : sheight;
+  for (y = 0; y < ylimit; y++)
+  {
+    frame = baseframe + y * swidth;
+    pixels = pixelsbase + y * width;
+    for (x = 0; x < xlimit; x++)
+    {
+      if (yuvFormat) {
+        *frame = *pixels;
+      } else {
+
+        pixel = *pixels;
+        r = pixel;
+        g = pixel >> 8;
+        b = pixel >> 16;
+
+        l = (299*r + 587*g + 114*b)/1000;
+        u = (-147*r + 289*g + 436*b)/1000 + 128;
+        v = (651*r + 515*g + 100*b) / 1000;
+
+        *frame = (l << 24) | (u << 16) | (l << 8) | (v);
+      }
+      frame++;
+      pixels++;
+    }
+  }
+}
+
+/* **************************************** /Video Module **************************************** */
+/* **************************************** Sound Module **************************************** */
+
+typedef struct {
+  unsigned char enabled;
+} SOUND_STATE;
+
+int InitSound(SOUND_STATE* ref)
+{
+  ref->enabled = 1;
+  return 0;
+}
+
+int ShutdownSound(SOUND_STATE* ref)
+{
+  ref->enabled = 0;
+  return 0;
+}
+
+int UpdateSound(SOUND_STATE* ref)
+{
+  // do nothing
+  return 0;
+}
+
+/* **************************************** /Sound Module **************************************** */
+/* **************************************** Input Module **************************************** */
+
+typedef struct {
+  unsigned char buttons[8];
+} INPUT_STATE;
+
+int InitInput(INPUT_STATE* ref)
+{
+  WPAD_Init();
+  return 0;
+}
+
+int ShutdownInput(INPUT_STATE* ref)
+{
+  return 0;
+}
+
+int UpdateInput(INPUT_STATE* ref)
+{
+  unsigned int pressed;
+  WPAD_ScanPads();
+  pressed = WPAD_ButtonsDown(0);
+  if (pressed & WPAD_BUTTON_HOME) {
+    globalState = STOPPING;
+  } 
+  return 0;
+}
+
+/* **************************************** /Input Module **************************************** */
+/* **************************************** Network Module **************************************** */
+
+typedef struct {
+  char localip[16];
+  char gateway[16];
+  char netmask[16];
+
+  int socket; 
+  struct sockaddr_in sockAddr;
+  lwp_t thread_handle;
+
+  VIDEO_STATE* pVideoState;
+  SOUND_STATE* pSoundState;
+  INPUT_STATE* pInputState;
+} NET_STATE;
+
+void* NetworkThread(void*);
+
+int InitNetwork(NET_STATE* ref)
+{
+  int ret, result;
+  ret = if_config(ref->localip, ref->netmask, ref->gateway, TRUE);
+  if (ret < 0) {
+    return -1;
+  }
+
+  ref->socket = net_socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+  if (ref->socket == INVALID_SOCKET) {
+    return -1;
+  }
+
+  memset(ref->sockAddr, 0, sizeof(ref->sockAddr));
+  ref->sockAddr.sin_family = AF_INET;
+  ref->sockAddr.sin_port = htons(NETWORK_PORT);
+  ref->sockAddr.sin_addr.s_addr = inet_addr(HOST_IP);
+
+  /*
+    getaddrinfo(HOST_NAME, STR(HOST_IP), NULL, &addrinfo);
+  */
+
+  result = net_connect(ref->socket, (struct sockaddr *)ref->sockAddr, sizeof(ref->sockAddr));
+  if (result == -1) {
+    net_close(ref->socket);
+    return -1;
+  }
+
+  LWP_CreateThread(&ref->thread_handle, NetworkThread, (void*)ref, 64*1024, 60);
+
+  return 0;
+}
+
+int ShutdownNetwork(NET_STATE* ref)
+{
+  net_close(ref->socket);
+  return 0;
+}
+
+typedef struct {
+  unsigned int dataLength;
+  unsigned int timeStamp;
+  unsigned int width;
+  unsigned int height;
+  unsigned int size;
+  unsigned char yuvFormat;
+} RESPONSE_HEADER;
+
+
+void* NetworkThread(void* arg)
+{
+  unsigned char* sendData;
+  unsigned int sendDataSz = 1024;
+  unsigned char* recvData;
+  unsigned int recvDataSz = 64 * 1024;
+  int lastTimeStamp = -1;
+  RESPONSE_HEADER responseHeader;
+
+  NET_STATE* ref = (NET_STATE*)arg;
+  if (ref == NULL) { return NULL; }
+
+  // init buffers
+  sendData = malloc(sendDataSz);
+  recvData = malloc(recvDataSz);
+  if (recvData == NULL || sendData == NULL) {
+    return NULL;
+  }
+
   memset(recvData, 0, recvDataSz);
   memset(sendData, 0, sendDataSz);
-  
-  socket_data handle = *((socket_data*)argument);
-  
-  while (bRunning)
-  { // ARGB
-    sendData[0] = 255;
-    sendData[1] = (frameCount % 256);
-    sendData[2] = 0;
-    sendData[3] = 0;
-    
-    net_send(handle.sock, sendData, 4, 0);
-    //net_send "req" + frameCount + 1;
-    /* input sendData */
-    // grab frame    
-    // image sendData and sound sendData
-    bytes = net_recv(handle.sock, recvData, 1024, 0); // echo server
-    
-    if (bytes <= 0) { bRunning = 0; }
-    
-    // update framebuffer
-    UpdateFramebuffer(frameBuffer[fb^1], recvData, bytes);    
-    fb ^= 1;
-    frameCount++;
+
+  /*
+    Operate in lock step for now.
+  */
+
+  while (globalState == STARTED)
+  {
+    int sentBytes, recvBytes;
+    COLOR_BUFFER renderFrame;
+
+    // prep data to send
+    sprintf(sendData, "Client response; Frame number: %i.\r\n", ref->pVideoState->frame++);
+    sentBytes = net_send(ref->socket, sendData, sendDataSz, 0);
+
+    if (sentBytes <= 0) { globalState = STOPPED; break; }
+
+    // prep data to recv frame
+    unsigned int bytesReceived = 0;
+
+    recvBytes = net_recv(ref->socket, (unsigned char*)&responseHeader, sizeof(RESPONSE_HEADER), 0);
+    if (recvBytes < sizeof(RESPONSE_HEADER)) {
+      globalState = STOPPED;
+      break;
+    }
+
+    if (responseHeader.dataLength > recvDataSz || responseHeader.dataLength == 0) {
+      globalState = STOPPED;
+      break;
+    }
+
+    while (bytesReceveid < responseHeader.dataLength && recvBytes > 0)
+    {
+      recvBytes = net_recv(ref->socket, recvData + bytesReceived, responseHeader.dataLength - bytesReceived, 0);
+      bytesReceived += recvBytes;
+    }
+
+    if (bytesReceived < responseHeader.dataLength) {
+      globalState = STOPPED;
+      break;
+    }
+
+    renderFrame.pixels = (unsigned int*)recvData;
+    renderFrame.width = responseHeader.width;
+    renderFrame.height = responseHeader.height;
+    renderFrame.size = responseHeader.size;
+    renderFrame.yuvFormat = responseHeader.yuvFormat;
+
+    if (responseHeader.timeStamp > lastTimeStamp) {
+      // blit the image to the screen
+      RenderColorBuffer(ref->pVideoState, renderFrame);
+      lastTimeStamp = responseHeader.timeStamp;
+    }
   }
-  
-  free(recvData);
+
+  // free buffers
   free(sendData);
-  
+  free(recvData);
+
   return NULL;
 }
 
-void UpdateFramebuffer(void* fb, char* buffer, s32 count)
-{
-  u16* colorBuffer = (u16*)fb;
-  u32* pixBuffer = (u32*)buffer;
-  u32 width = rmode->fbWidth;
-  u32 height = rmode->xfbHeight;
-  //u32 color = ((u32*)buffer)[0];
-  u32 x, y;
-  
-  for (y = 0; y < height; y++)
-  {
-    for (x = 0; x < width; x++)
-    {
-      u16 dx;
-      u16 dy;
-      u16 p;
-      u8 r; u8 g; u8 b; u8 a;
-      u32 rgba;
-      u16 convertedColor;
-      
-      dx = x * SCR_WIDTH / width;
-      dy = y * SCR_HEIGHT / height;
-      p = SCR_WIDTH * PIX_SIZE;
-      
-      rgba = pixBuffer[dy*p + dx];
-      r = ((rgba >> 24)) >> 3;
-      g = ((rgba >> 16) & 0xFF) >> 3;
-      b = ((rgba >> 8) & 0xFF) >> 3;
-      a = (rgba & 0xFF) >> 7;
-      convertedColor = (a << 15) | (b << 10) | (g << 5) | (r);
+/* **************************************** /Network Module **************************************** */
+/* **************************************** Main Module **************************************** */
 
-      *colorBuffer = convertedColor;
-      //pixBuffer[dy*p + dx]; //color;
-      colorBuffer++;
-    }
-  }
+int main(int argc, char* argv[])
+{
+  NET_STATE networkState;
+  VIDEO_STATE videoState;
+  SOUND_STATE soundState;
+  INPUT_STATE inputState;
+
+  memset(&networkState, 0, sizeof(NET_STATE));
+  memset(&videoState, 0, sizeof(VIDEO_STATE));
+  memset(&soundState, 0, sizeof(SOUND_STATE));
+  memset(&inputState, 0, sizeof(INPUT_STATE));
+  globalState = STARTED;
+
+  if (InitVideo(&videoState) == -1) exit(1);
+  if (InitSound(&soundState) == -1) exit(1);
+  if (InitInput(&inputState) == -1) exit(1);
+
+  networkState.pVideoState = &videoState;
+  networkState.pSoundState = &soundState;
+  networkState.pInputState = &inputState;
+
+  if (InitNetwork(&networkState) == -1) exit(1);
+
+  do {
+    UpdateSound(&soundState);
+    UpdateInput(&inputState);
+    FlipVideo(&videoState);
+  } while (globalState == STARTED);
+
+  ShutdownVideo(&videoState);
+  ShutdownNetwork(&networkState);
+  ShutdownSound(&soundState);
+  ShutdownInput(&inputState);
+
+  exit(0);
+  return 0;
 }
 
-int main(int argc, char** argv) 
-{
-    u32 ret;
-    socket_data data;
-    u32 error = 0;
-    
-    char localip[16] = {0};
-    char gateway[16] = {0};
-    char netmask[16] = {0};
-   
-    VIDEO_Init();
-    WPAD_Init();
-    
-    rmode = VIDEO_GetPreferredMode(NULL);
-    
-    frameBuffer[0] = MEM_K0_TO_K1(SYS_AllocateFramebuffer(rmode));
-    frameBuffer[1] = MEM_K0_TO_K1(SYS_AllocateFramebuffer(rmode));
- 
-    // start jpeg
-//  njInit();
-    
-    // start network
-    ret = if_config( localip, netmask, gateway, TRUE );
-    if (ret >= 0) {
-      data.sock = net_socket (AF_INET, SOCK_STREAM, IPPROTO_IP);
-      if (data.sock == INVALID_SOCKET) {
-       // cannot create a socket
-       error = 2;
-      } else {
-        memset(&data.sa, 0, sizeof( data.sa));
-        data.sa.sin_family = AF_INET;
-        data.sa.sin_port = htons(970);
-        data.sa.sin_addr.s_addr = inet_addr("192.168.1.90");
-        
-        //res = inet_pton(AF_INET, "alien-pc", &data.sa.sin_addr);
-        //struct hostent * net_gethostbyname(const char *addrString);
-      
-        if (-1 == net_connect(data.sock, (struct sockaddr *)&data.sa, sizeof(data.sa))) {
-          net_close(data.sock);
-          error = 3;
-        } else {
-          //net_recv();
-        }
-      }
-    } else {
-      error = 1;
-    }
-
-    // start wii systems
-    VIDEO_Configure(rmode);
-    VIDEO_SetNextFramebuffer(frameBuffer[fb]);
-    VIDEO_SetBlack(FALSE);
-    VIDEO_Flush();
-    VIDEO_WaitVSync();
-    if (rmode->viTVMode & VI_NON_INTERLACE) VIDEO_WaitVSync();
-    
-    // spawn thread
-    if (error == 0)
-    {
-      // start network thread
-      LWP_CreateThread(&thread_handle, networkThread, (void*)&data, NULL, 32*1024, 50);
-    }
-    
-    while 
-      (error == 0 && bRunning == 1) 
-    {
-      u32 pressed;
-      
-      WPAD_ScanPads();
-      pressed = WPAD_ButtonsDown(0);
-      
-      if (pressed & WPAD_BUTTON_HOME) {bRunning = 0; } //;exit(0);
-      
-      // per frame callback
-      // update input array
-      // ...
-    
-      VIDEO_SetNextFramebuffer(frameBuffer[fb]);
-      VIDEO_Flush();    
-      VIDEO_WaitVSync();
-      if (rmode->viTVMode & VI_NON_INTERLACE) VIDEO_WaitVSync();
-    }
-    
-//  njDone();
-
-    // term
-    net_close(data.sock);
-    return 0;
-}
+/* **************************************** /Main Module **************************************** */
