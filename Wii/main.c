@@ -24,9 +24,21 @@ typedef enum {
 
 /* extern */ _STATE globalState;
 
-#define NETWORK_PORT    970
-#define HOST_IP         "192.168.1.90"
-#define HOST_NAME       "alien-pc"
+#define INPUT_BUFFER_SIZE   (512*1024)
+#define OUTPUT_BUFFER_SIZE  1024
+
+#define NETWORK_PORT      970
+#define HOST_NAME         "alien-pc"
+#define HOST_IP           "192.168.1.90"
+
+typedef struct {
+  unsigned int dataLength;
+  unsigned int timeStamp;
+  unsigned int width;
+  unsigned int height;
+  unsigned int size;
+  unsigned char yuvFormat;
+} RESPONSE_HEADER;
 
 /* **************************************** /Main Header **************************************** */
 /* **************************************** Video Module **************************************** */
@@ -36,6 +48,14 @@ typedef struct {
   void* frameBuffer;
   unsigned int frame;
 } VIDEO_STATE;
+
+typedef struct {
+  unsigned int * pixels;
+  unsigned int width;
+  unsigned int height;
+  unsigned int size;
+  unsigned char yuvFormat;
+} COLOR_BUFFER;
 
 int InitVideo(VIDEO_STATE* ref)
 {
@@ -111,14 +131,6 @@ int FlipVideo(VIDEO_STATE* ref)
   return 0;
 }
 
-typedef struct {
-  unsigned int * pixels;
-  unsigned int width;
-  unsigned int height;
-  unsigned int size;
-  unsigned char yuvFormat;
-} COLOR_BUFFER;
-
 int RenderColorBuffer(VIDEO_STATE* ref, COLOR_BUFFER* buffer)
 {
   unsigned int x, y;
@@ -129,7 +141,7 @@ int RenderColorBuffer(VIDEO_STATE* ref, COLOR_BUFFER* buffer)
   unsigned int* frame;
   unsigned int* pixelsbase;
   unsigned int* pixels;
-  unsigned char format;
+  unsigned char yuvFormat;
   // inner loop
   unsigned int pixel;
   unsigned int r, g, b;
@@ -234,14 +246,13 @@ typedef struct {
   char localip[16];
   char gateway[16];
   char netmask[16];
-
   int socket; 
   struct sockaddr_in sockAddr;
   lwp_t thread_handle;
-
   VIDEO_STATE* pVideoState;
   SOUND_STATE* pSoundState;
   INPUT_STATE* pInputState;
+  unsigned char threadTerminated;
 } NET_STATE;
 
 void* NetworkThread(void*);
@@ -274,33 +285,32 @@ int InitNetwork(NET_STATE* ref)
     return -1;
   }
 
-  LWP_CreateThread(&ref->thread_handle, NetworkThread, (void*)ref, 64*1024, 60);
+  if (LWP_CreateThread(&ref->thread_handle, NetworkThread, (void*)ref, 64*1024, 60) < 0)
+  {
+    ref->threadTerminated = 1;
+    return -1;
+  }
 
   return 0;
 }
 
 int ShutdownNetwork(NET_STATE* ref)
 {
+  if (!ref->threadTerminated) {
+    void* ret_value;
+    LWP_JoinThread(ref->thread_handle, &ret_value);
+  }
+
   net_close(ref->socket);
   return 0;
 }
 
-typedef struct {
-  unsigned int dataLength;
-  unsigned int timeStamp;
-  unsigned int width;
-  unsigned int height;
-  unsigned int size;
-  unsigned char yuvFormat;
-} RESPONSE_HEADER;
-
-
 void* NetworkThread(void* arg)
 {
   unsigned char* sendData;
-  unsigned int sendDataSz = 1024;
+  unsigned int sendDataSz = INPUT_BUFFER_SIZE;
   unsigned char* recvData;
-  unsigned int recvDataSz = 64 * 1024;
+  unsigned int recvDataSz = OUTPUT_BUFFER_SIZE;
   int lastTimeStamp = -1;
   RESPONSE_HEADER responseHeader;
 
@@ -346,7 +356,7 @@ void* NetworkThread(void* arg)
       break;
     }
 
-    while (bytesReceveid < responseHeader.dataLength && recvBytes > 0)
+    while (bytesReceived < responseHeader.dataLength && recvBytes > 0)
     {
       recvBytes = net_recv(ref->socket, recvData + bytesReceived, responseHeader.dataLength - bytesReceived, 0);
       bytesReceived += recvBytes;
@@ -373,6 +383,7 @@ void* NetworkThread(void* arg)
   // free buffers
   free(sendData);
   free(recvData);
+  ref->threadTerminated = 1;
 
   return NULL;
 }
@@ -410,8 +421,8 @@ int main(int argc, char* argv[])
   } while (globalState == STARTED);
 
   ShutdownVideo(&videoState);
-  ShutdownNetwork(&networkState);
   ShutdownSound(&soundState);
+  ShutdownNetwork(&networkState);
   ShutdownInput(&inputState);
 
   exit(0);
