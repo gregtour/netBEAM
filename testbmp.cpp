@@ -14,10 +14,14 @@ using namespace std;
 
 #define SIG_TERMS       /*64*/ 15
 
-#define SATURATION      1.26
+#define SATURATION      1.12
 
 #ifdef QHD
-#define QUANT_FACTOR    (86 / ((j+1)/2 + 1) + 5)
+#define QUANT_FACTOR    (j < 1 ? 40 : j < 3 ? 40 : j < 6 ? 16 : j < 10 ? 9 : j < 15 ? 8 : j < 21 ? 7 : j < 28 ? 6 : j < 36 ? 5 : j < 45 ? 4 : 3)
+//(j == 0 ? 40 : 86 / ((j+1)/2 + 1) + 5)
+//(j < 1 ? 40 : j < 3 ? 20 : 10)
+//j < 6 ? 16 : j < 10 ? 12 : j < 15 ? 8 : j < 21 ? 7 : j < 28 ? 6 : j < 36 ? 5 : j < 45 ? 4 : 3)
+//(j == 0 ? 40 : 86 / ((j+1)/2 + 1) + 5)
 #else
 #define QUANT_FACTOR    (j == 0 ? 40 : 40 / ((j+1)/2) + 3)
 #endif
@@ -203,8 +207,13 @@ MACROBLOCK* DCTcompress(const unsigned char* img, const int width, const int hei
 
                 for (j = 0; j < SIG_TERMS; j++)
                 {   double quantized = (dct[j] / QUANT_FACTOR + 0.5);
-                    if (quantized < CLAMP_MIN) quantized = CLAMP_MIN;
-                    if (quantized > CLAMP_MAX) quantized = CLAMP_MAX;
+                    if (j == 0) {
+                        if (quantized < -128) quantized = -128;
+                        if (quantized > 127) quantized = 127;
+                    } else {
+                        if (quantized < CLAMP_MIN) quantized = CLAMP_MIN;
+                        if (quantized > CLAMP_MAX) quantized = CLAMP_MAX;
+                    }
                     coef[j] = (coffType)quantized;
                 }
             }
