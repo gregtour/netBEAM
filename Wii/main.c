@@ -15,6 +15,7 @@
 #include <debug.h>
 #include <errno.h>
 #include <wiiuse/wpad.h>
+#include <grrlib.h>
 
 typedef enum {
   ERROR = 0,
@@ -24,8 +25,9 @@ typedef enum {
 
 /* extern */ _STATE globalState;
 
-#define INPUT_BUFFER_SIZE   (512*1024)
-#define OUTPUT_BUFFER_SIZE  1024
+//#define INPUT_BUFFER_SIZE   (512*1024)
+#define INPUT_BUFFER_SIZE   (1024*1024)
+#define OUTPUT_BUFFER_SIZE  128
 
 #define NETWORK_PORT      970
 #define HOST_NAME         "alien-pc"
@@ -40,12 +42,30 @@ typedef struct {
   unsigned char yuvFormat;
 } RESPONSE_HEADER;
 
+// macro
+//! Byte swap unsigned int
+unsigned int swap_uint32(unsigned int val)
+{
+	val = ((val << 8) & 0xFF00FF00) | ((val >> 8) & 0xFF00FF);
+	return (val << 16) | (val >> 16);
+}
+
+
 /* **************************************** /Main Header **************************************** */
 /* **************************************** Video Module **************************************** */
 
+#define USING_GRRLIB
+
+const int DRAW_BUFFER_WIDTH = 640;
+const int DRAW_BUFFER_HEIGHT = 480;
+
 typedef struct {
+#ifndef USING_GRRLIB
   GXRModeObj* rmode;
   void* frameBuffer;
+#else
+  GRRLIB_texImg *drawBuffer;
+#endif
   unsigned int frame;
 } VIDEO_STATE;
 
@@ -59,6 +79,7 @@ typedef struct {
 
 int InitVideo(VIDEO_STATE* ref)
 {
+#ifndef USING_GRRLIB
   unsigned int x;
   unsigned int y;
 
@@ -97,12 +118,17 @@ int InitVideo(VIDEO_STATE* ref)
   if (ref->rmode->viTVMode & VI_NON_INTERLACE) {
     VIDEO_WaitVSync();
   }
+#else
+  GRRLIB_Init();
+  ref->drawBuffer = GRRLIB_CreateEmptyTexture(DRAW_BUFFER_WIDTH, DRAW_BUFFER_HEIGHT);
+#endif
 
   return 0;
 }
 
 int ShutdownVideo(VIDEO_STATE* ref)
 {
+#ifndef USING_GRRLIB
   unsigned int x;
   unsigned int y;
 
@@ -115,12 +141,16 @@ int ShutdownVideo(VIDEO_STATE* ref)
       innerBuffer[y * ref->rmode->fbWidth + x] = COLOR_RED;
     }
   }
-
+#else
+  GRRLIB_FreeTexture(ref->drawBuffer);
+  GRRLIB_Exit();  
+#endif
   return 0;
 }
 
 int FlipVideo(VIDEO_STATE* ref)
 {
+#ifndef USING_GRRLIB
   // flip framebuffer & wait vsync
   VIDEO_SetNextFramebuffer(ref->frameBuffer);
   VIDEO_Flush();    
@@ -128,12 +158,42 @@ int FlipVideo(VIDEO_STATE* ref)
   if (ref->rmode->viTVMode & VI_NON_INTERLACE) {
     VIDEO_WaitVSync();
   }
+#else
+  GRRLIB_FillScreen(0xFFFFFFFF);
+  GRRLIB_DrawImg(0, 0, ref->drawBuffer, 0, 1, 1, 0xFFFFFFFF);
+  GRRLIB_Render();
+#endif
   return 0;
 }
 
 int RenderColorBuffer(VIDEO_STATE* ref, COLOR_BUFFER* buffer)
 {
   unsigned int x, y;
+#ifdef USING_GRRLIB
+  //unsigned int* texture = (unsigned int*)ref->drawBuffer->data;
+  for (y = 0; y < DRAW_BUFFER_HEIGHT; y++)
+  {
+    for (x = 0; x < DRAW_BUFFER_WIDTH; x++)
+    {
+      /*if (y < buffer->height && x < buffer->width) {
+        *texture = buffer->pixels[y * buffer->width + x];
+      } else {
+        *texture = RGBA(255,0,0,255);
+      }
+      texture++;*/
+      unsigned int copyx = x / 4;
+      unsigned int copyy = y / 4;
+      unsigned int color = RGBA(255, 0, 0, 255);
+      if (copyy < buffer->height && copyx < buffer->width) {
+        color = buffer->pixels[copyy * buffer->width + copyx];
+      }
+      GRRLIB_SetPixelTotexImg(x, y, ref->drawBuffer, color);
+    }
+  }
+  
+  GRRLIB_FlushTex(ref->drawBuffer);
+#endif
+#ifndef USING_GRRLIB
   unsigned int swidth, sheight;
   unsigned int width, height;
   unsigned int xlimit, ylimit;
@@ -183,6 +243,8 @@ int RenderColorBuffer(VIDEO_STATE* ref, COLOR_BUFFER* buffer)
       pixels++;
     }
   }
+#endif
+  return 0;
 }
 
 /* **************************************** /Video Module **************************************** */
@@ -270,7 +332,7 @@ int InitNetwork(NET_STATE* ref)
     return -1;
   }
 
-  memset(ref->sockAddr, 0, sizeof(ref->sockAddr));
+  memset(&ref->sockAddr, 0, sizeof(ref->sockAddr));
   ref->sockAddr.sin_family = AF_INET;
   ref->sockAddr.sin_port = htons(NETWORK_PORT);
   ref->sockAddr.sin_addr.s_addr = inet_addr(HOST_IP);
@@ -279,13 +341,13 @@ int InitNetwork(NET_STATE* ref)
     getaddrinfo(HOST_NAME, STR(HOST_IP), NULL, &addrinfo);
   */
 
-  result = net_connect(ref->socket, (struct sockaddr *)ref->sockAddr, sizeof(ref->sockAddr));
+  result = net_connect(ref->socket, (struct sockaddr *)&ref->sockAddr, sizeof(ref->sockAddr));
   if (result == -1) {
     net_close(ref->socket);
     return -1;
   }
 
-  if (LWP_CreateThread(&ref->thread_handle, NetworkThread, (void*)ref, 64*1024, 60) < 0)
+  if (LWP_CreateThread(&ref->thread_handle, NetworkThread, (void*)ref, NULL, 64*1024, 60) < 0)
   {
     ref->threadTerminated = 1;
     return -1;
@@ -307,11 +369,11 @@ int ShutdownNetwork(NET_STATE* ref)
 
 void* NetworkThread(void* arg)
 {
-  unsigned char* sendData;
-  unsigned int sendDataSz = INPUT_BUFFER_SIZE;
-  unsigned char* recvData;
-  unsigned int recvDataSz = OUTPUT_BUFFER_SIZE;
-  int lastTimeStamp = -1;
+  char* sendData;
+  unsigned int sendDataSz = OUTPUT_BUFFER_SIZE;
+  char* recvData;
+  unsigned int recvDataSz = INPUT_BUFFER_SIZE;
+  unsigned int lastTimeStamp = 1;
   RESPONSE_HEADER responseHeader;
 
   NET_STATE* ref = (NET_STATE*)arg;
@@ -337,33 +399,42 @@ void* NetworkThread(void* arg)
     COLOR_BUFFER renderFrame;
 
     // prep data to send
+    memset(sendData, 0, sendDataSz);
     sprintf(sendData, "Client response; Frame number: %i.\r\n", ref->pVideoState->frame++);
-    sentBytes = net_send(ref->socket, sendData, sendDataSz, 0);
+    sentBytes = net_send(ref->socket, sendData, strlen(sendData)+1, 0);
 
-    if (sentBytes <= 0) { globalState = STOPPED; break; }
+    if (sentBytes < 0) { globalState = STOPPING; break; }
 
     // prep data to recv frame
     unsigned int bytesReceived = 0;
 
-    recvBytes = net_recv(ref->socket, (unsigned char*)&responseHeader, sizeof(RESPONSE_HEADER), 0);
+    recvBytes = net_recv(ref->socket, (char*)&responseHeader, sizeof(RESPONSE_HEADER), 0);
+    if (recvBytes == 0) continue;
     if (recvBytes < sizeof(RESPONSE_HEADER)) {
-      globalState = STOPPED;
+      globalState = STOPPING;
+      sprintf(sendData, "Client response; Error: partial header received, size %i.\r\n", recvBytes);
+      sentBytes = net_send(ref->socket, sendData, strlen(sendData)+1, 0);
       break;
     }
 
     if (responseHeader.dataLength > recvDataSz || responseHeader.dataLength == 0) {
-      globalState = STOPPED;
+      sprintf(sendData, "Client response; Frame too big or size zero. Size: %i.\r\n", responseHeader.dataLength);
+      sentBytes = net_send(ref->socket, sendData, strlen(sendData)+1, 0);
+      globalState = STOPPING;
       break;
     }
 
-    while (bytesReceived < responseHeader.dataLength && recvBytes > 0)
+    while (bytesReceived < responseHeader.dataLength && recvBytes >= 0)
     {
       recvBytes = net_recv(ref->socket, recvData + bytesReceived, responseHeader.dataLength - bytesReceived, 0);
       bytesReceived += recvBytes;
     }
 
     if (bytesReceived < responseHeader.dataLength) {
-      globalState = STOPPED;
+      globalState = STOPPING;
+      sprintf(sendData, "Client response; Didn't receive complete frame. %i bytes out of %i.\r\n", 
+        bytesReceived, responseHeader.dataLength);
+      sentBytes = net_send(ref->socket, sendData, strlen(sendData)+1, 0);
       break;
     }
 
@@ -372,10 +443,14 @@ void* NetworkThread(void* arg)
     renderFrame.height = responseHeader.height;
     renderFrame.size = responseHeader.size;
     renderFrame.yuvFormat = responseHeader.yuvFormat;
+    
+    sprintf(sendData, "Client response; Drawing frame %i.\r\n", 
+      ref->pVideoState->frame-1);
+    sentBytes = net_send(ref->socket, sendData, strlen(sendData)+1, 0);
 
     if (responseHeader.timeStamp > lastTimeStamp) {
       // blit the image to the screen
-      RenderColorBuffer(ref->pVideoState, renderFrame);
+      RenderColorBuffer(ref->pVideoState, &renderFrame);
       lastTimeStamp = responseHeader.timeStamp;
     }
   }
